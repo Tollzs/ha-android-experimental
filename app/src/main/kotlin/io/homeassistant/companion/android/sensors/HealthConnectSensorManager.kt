@@ -58,6 +58,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
+import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -73,6 +74,8 @@ class HealthConnectSensorManager @Inject constructor(
     override val serverManager: ServerManager,
 ) : SensorManager {
     companion object {
+        private const val NUTRITION_HISTORY_DAYS = 7L
+
         fun getPermissionIntent(): Intent? = Intent(HealthConnectClient.ACTION_HEALTH_CONNECT_SETTINGS)
 
         fun getPermissionResultContract(): ActivityResultContract<Set<String>, Set<String>>? =
@@ -1073,9 +1076,13 @@ class HealthConnectSensorManager @Inject constructor(
             buildNutritionRecordsRequest(),
         ) ?: return
 
+        val zoneId = ZoneId.systemDefault()
+        val today = LocalDate.now(zoneId)
+
         val entries = response.records.map { record ->
             mapOf(
                 "record_id" to record.metadata.id,
+                "date" to record.startTime.atZone(zoneId).toLocalDate().toString(),
                 "meal_type" to getMealType(record.mealType),
                 "meal_type_raw" to record.mealType,
                 "name" to record.name,
@@ -1101,12 +1108,33 @@ class HealthConnectSensorManager @Inject constructor(
             )
         }
 
+        val dailyTotals = response.records
+            .groupBy { record ->
+                record.startTime.atZone(zoneId).toLocalDate().toString()
+            }
+            .mapValues { (_, records) ->
+                mapOf(
+                    "records" to records.size,
+                    "calories" to records.sumOf { it.energy?.inKilocalories ?: 0.0 },
+                    "protein" to records.sumOf { it.protein?.inGrams ?: 0.0 },
+                    "carbohydrates" to records.sumOf { it.totalCarbohydrate?.inGrams ?: 0.0 },
+                    "fat" to records.sumOf { it.totalFat?.inGrams ?: 0.0 },
+                    "sugar" to records.sumOf { it.sugar?.inGrams ?: 0.0 },
+                )
+            }
+
+        val todayRecordCount = response.records.count { record ->
+            record.startTime.atZone(zoneId).toLocalDate() == today
+        }
+
         onSensorUpdated(
             nutritionRecords,
-            response.records.size,
+            todayRecordCount,
             nutritionRecords.statelessIcon,
             attributes = mapOf(
                 "entries" to entries,
+                "daily_totals" to dailyTotals,
+                "history_days" to NUTRITION_HISTORY_DAYS,
                 "last_updated" to Instant.now().toString(),
             ),
         )
@@ -1259,15 +1287,15 @@ class HealthConnectSensorManager @Inject constructor(
 
     private fun buildNutritionRecordsRequest(): ReadRecordsRequest<NutritionRecord> {
         val now = LocalDateTime.now()
-        val today = now.toLocalDate()
+        val startDate = now.toLocalDate().minusDays(NUTRITION_HISTORY_DAYS - 1)
         return ReadRecordsRequest(
             recordType = NutritionRecord::class,
             timeRangeFilter = TimeRangeFilter.between(
-                LocalDateTime.of(today, LocalTime.MIDNIGHT),
+                LocalDateTime.of(startDate, LocalTime.MIDNIGHT),
                 now,
             ),
             ascendingOrder = true,
-            pageSize = 100,
+            pageSize = 1000,
         )
     }
 
